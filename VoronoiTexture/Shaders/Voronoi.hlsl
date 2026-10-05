@@ -100,11 +100,11 @@ float VoronoiEdgeDist(float2 uv, float jitter, float seed, float time)
     }
     
     md = 8.0;
-    for (int j = -2; j <= 2; j++)
+    for (int jj = -2; jj <= 2; jj++)
     {
-        for (int i = -2; i <= 2; i++)
+        for (int ii = -2; ii <= 2; ii++)
         {
-            float2 g = mg + float2(float(i), float(j));
+            float2 g = mg + float2(float(ii), float(jj));
             float2 h = VoronoiHash22(n + g, seed);
             
             float2 animatedOffset = 0.5 + 0.5 * sin(time + VORONOI_TWO_PI * h);

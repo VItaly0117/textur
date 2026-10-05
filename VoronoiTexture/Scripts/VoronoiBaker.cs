@@ -41,6 +41,8 @@ namespace VoronoiTexture
         /// </summary>
         public RenderTexture Output { get; private set; }
 
+        private MaterialPropertyBlock _propertyBlock;
+
         private void Update()
         {
             if (liveUpdate)
@@ -66,7 +68,11 @@ namespace VoronoiTexture
             {
                 if (targetRenderer.sharedMaterial.HasProperty(targetTextureProperty))
                 {
-                    targetRenderer.sharedMaterial.SetTexture(targetTextureProperty, Output);
+                    // MaterialPropertyBlock keeps the material asset untouched (no dirty .mat in edit mode).
+                    if (_propertyBlock == null) _propertyBlock = new MaterialPropertyBlock();
+                    targetRenderer.GetPropertyBlock(_propertyBlock);
+                    _propertyBlock.SetTexture(targetTextureProperty, Output);
+                    targetRenderer.SetPropertyBlock(_propertyBlock);
                 }
             }
         }

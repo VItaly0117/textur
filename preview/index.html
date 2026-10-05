@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voronoi Preview</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0d0d14; }
+    body { font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #controls {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      width: 218px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      background: rgba(18, 18, 24, 0.9);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(8px);
+    }
+    h1 { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+    .row { display: grid; grid-template-columns: 78px 1fr 34px; align-items: center; gap: 6px; margin: 5px 0; }
+    .row.select, .row.color { grid-template-columns: 78px 1fr; }
+    label { color: #d4d4dc; }
+    input, select, button {
+      min-width: 0;
+      border: 1px solid #41414c;
+      border-radius: 4px;
+      color: #eeeeF2;
+      background: #292932;
+      font: inherit;
+    }
+    input[type="range"] { width: 100%; height: 18px; accent-color: #e6994d; }
+    input[type="color"] { width: 100%; height: 24px; padding: 2px; }
+    select { width: 100%; height: 25px; padding: 2px 5px; }
+    output { text-align: right; color: #aaaab5; font-variant-numeric: tabular-nums; }
+    button { width: 100%; margin-top: 8px; padding: 6px 8px; cursor: pointer; }
+    button:hover { background: #363642; }
+    #error {
+      display: none;
+      position: fixed;
+      inset: 50% auto auto 50%;
+      transform: translate(-50%, -50%);
+      max-width: 360px;
+      padding: 12px 16px;
+      border-radius: 7px;
+      color: #ffd8d8;
+      background: #4a1717;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <section id="controls" aria-label="Voronoi controls">
+    <h1>Voronoi Preview</h1>
+    <div class="row"><label for="scale">Scale</label><input id="scale" type="range" min="1" max="32" step="0.1" value="8"><output for="scale">8</output></div>
+    <div class="row"><label for="jitter">Jitter</label><input id="jitter" type="range" min="0" max="1" step="0.01" value="1"><output for="jitter">1</output></div>
+    <div class="row"><label for="seed">Seed</label><input id="seed" type="range" min="0" max="100" step="0.1" value="0"><output for="seed">0</output></div>
+    <div class="row"><label for="animSpeed">Anim Speed</label><input id="animSpeed" type="range" min="0" max="4" step="0.01" value="0.5"><output for="animSpeed">0.5</output></div>
+    <div class="row select"><label for="mode">Mode</label><select id="mode"><option value="0">F1</option><option value="1">F2</option><option value="2">F2-F1</option><option value="3" selected>Edges</option></select></div>
+    <div class="row select"><label for="metric">Metric</label><select id="metric"><option value="0" selected>Euclidean</option><option value="1">Manhattan</option><option value="2">Chebyshev</option></select></div>
+    <div class="row"><label for="edgeWidth">Edge Width</label><input id="edgeWidth" type="range" min="0.001" max="0.5" step="0.001" value="0.05"><output for="edgeWidth">0.05</output></div>
+    <div class="row"><label for="contrast">Contrast</label><input id="contrast" type="range" min="0.1" max="4" step="0.1" value="1"><output for="contrast">1</output></div>
+    <div class="row color"><label for="colorA">Color A</label><input id="colorA" type="color" value="#0d0d14"></div>
+    <div class="row color"><label for="colorB">Color B</label><input id="colorB" type="color" value="#e6994d"></div>
+    <div class="row color"><label for="edgeColor">Edge Color</label><input id="edgeColor" type="color" value="#ffffff"></div>
+    <button id="save" type="button">Save PNG</button>
+  </section>
+  <p id="error" role="alert">WebGL2 is unavailable in this browser.</p>
+
+  <script>
+    "use strict";
+
+    const VERTEX_SOURCE = `#version 300 es
+      precision highp float;
+
+      void main() {
+        vec2 position = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+        gl_Position = vec4(position * 2.0 - 1.0, 0.0, 1.0);
+      }
+    `;
+
+    const FRAGMENT_SOURCE = `#version 300 es
+      precision highp float;
+      precision highp int;
+
+      uniform vec2 uResolution;
+      uniform float _Scale;
+      uniform float _Jitter;
+      uniform float _Seed;
+      uniform float _AnimSpeed;
+      uniform int _Mode;
+      uniform int _Metric;
+      uniform float _EdgeWidth;
+      uniform float _Contrast;
+      uniform vec3 _ColorA;
+      uniform vec3 _ColorB;
+      uniform vec3 _EdgeColor;
+      uniform float uTime;
+
+      out vec4 fragmentColor;
+
+      vec2 VoronoiHash22(vec2 p, float seed) {
+        p += seed;
+        vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.xx + p3.yz) * p3.zy);
+      }
+
+      float VoronoiDistance(vec2 d, int metric) {
+        if (metric == 1) {
+          return abs(d.x) + abs(d.y);
+        }
+        if (metric == 2) {
+          return max(abs(d.x), abs(d.y));
+        }
+        return length(d);
+      }
+
+      vec2 VoronoiPoint(vec2 cell, float jitter, float seed, float time) {
+        vec2 hashValue = VoronoiHash22(cell, seed);
+        vec2 animatedPoint = 0.5 + 0.5 * sin(time + 6.2831 * hashValue);
+        return mix(vec2(0.5), animatedPoint, jitter);
+      }
+
+      void VoronoiF1F2(
+        vec2 uv,
+        float jitter,
+        float seed,
+        float time,
+        int metric,
+        out float f1,
+        out float f2,
+        out vec2 cellId
+      ) {
+        vec2 baseCell = floor(uv);
+        vec2 localPosition = fract(uv);
+        f1 = 1e10;
+        f2 = 1e10;
+        cellId = vec2(0.0);
+
+        for (int y = -1; y <= 1; ++y) {
+          for (int x = -1; x <= 1; ++x) {
+            vec2 neighbor = vec2(float(x), float(y));
+            vec2 point = VoronoiPoint(baseCell + neighbor, jitter, seed, time);
+            float distanceToPoint = VoronoiDistance(neighbor + point - localPosition, metric);
+            if (distanceToPoint < f1) {
+              f2 = f1;
+              f1 = distanceToPoint;
+              cellId = baseCell + neighbor;
+            } else if (distanceToPoint < f2) {
+              f2 = distanceToPoint;
+            }
+          }
+        }
+      }
+
+      float VoronoiEdgeDist(vec2 uv, float jitter, float seed, float time) {
+        vec2 baseCell = floor(uv);
+        vec2 localPosition = fract(uv);
+        vec2 nearestVector = vec2(0.0);
+        vec2 nearestCellOffset = vec2(0.0);
+        float nearestSquaredDistance = 1e10;
+
+        for (int y = -1; y <= 1; ++y) {
+          for (int x = -1; x <= 1; ++x) {
+            vec2 cellOffset = vec2(float(x), float(y));
+            vec2 point = VoronoiPoint(baseCell + cellOffset, jitter, seed, time);
+            vec2 pointVector = cellOffset + point - localPosition;
+            float squaredDistance = dot(pointVector, pointVector);
+            if (squaredDistance < nearestSquaredDistance) {
+              nearestSquaredDistance = squaredDistance;
+              nearestVector = pointVector;
+              nearestCellOffset = cellOffset;
+            }
+          }
+        }
+
+        float borderDistance = 1e10;
+        for (int y = -2; y <= 2; ++y) {
+          for (int x = -2; x <= 2; ++x) {
+            vec2 cellOffset = nearestCellOffset + vec2(float(x), float(y));
+            vec2 point = VoronoiPoint(baseCell + cellOffset, jitter, seed, time);
+            vec2 pointVector = cellOffset + point - localPosition;
+            vec2 difference = nearestVector - pointVector;
+            if (dot(difference, difference) > 0.00001) {
+              borderDistance = min(
+                borderDistance,
+                dot(0.5 * (nearestVector + pointVector), normalize(pointVector - nearestVector))
+              );
+            }
+          }
+        }
+        return borderDistance;
+      }
+
+      float CombineVoronoi(float f1, float f2, float edge, int mode, float edgeWidth) {
+        if (mode == 0) {
+          return clamp(f1, 0.0, 1.0);
+        }
+        if (mode == 1) {
+          return clamp(f2, 0.0, 1.0);
+        }
+        if (mode == 2) {
+          return clamp(f2 - f1, 0.0, 1.0);
+        }
+        return clamp(1.0 - smoothstep(0.0, max(edgeWidth, 1e-4), edge), 0.0, 1.0);
+      }
+
+      void main() {
+        vec2 uv = gl_FragCoord.xy / min(uResolution.x, uResolution.y);
+        vec2 cellId;
+        float f1;
+        float f2;
+        float time = uTime * _AnimSpeed;
+        VoronoiF1F2(uv * _Scale, _Jitter, _Seed, time, _Metric, f1, f2, cellId);
+        float edge = _Mode == 3
+          ? VoronoiEdgeDist(uv * _Scale, _Jitter, _Seed, time)
+          : 1.0;
+        float value = CombineVoronoi(f1, f2, edge, _Mode, _EdgeWidth);
+        value = clamp(pow(clamp(value, 0.0, 1.0), _Contrast), 0.0, 1.0);
+
+        vec3 color;
+        if (_Mode == 3) {
+          vec3 baseColor = mix(_ColorA, _ColorB, VoronoiHash22(cellId, _Seed).x);
+          color = mix(baseColor, _EdgeColor, value);
+        } else {
+          color = mix(_ColorA, _ColorB, value);
+        }
+        fragmentColor = vec4(color, 1.0);
+      }
+    `;
+
+    const canvas = document.querySelector("#canvas");
+    const errorMessage = document.querySelector("#error");
+    const controls = document.querySelector("#controls");
+    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+
+    if (!gl) {
+      controls.hidden = true;
+      errorMessage.style.display = "block";
+    } else {
+      startPreview(gl);
+    }
+
+    function createShader(context, type, source) {
+      const shader = context.createShader(type);
+      if (!shader) {
+        throw new Error("Unable to create WebGL shader.");
+      }
+      context.shaderSource(shader, source);
+      context.compileShader(shader);
+      if (!context.getShaderParameter(shader, context.COMPILE_STATUS)) {
+        const message = context.getShaderInfoLog(shader) || "Unknown shader compilation error.";
+        context.deleteShader(shader);
+        throw new Error(message);
+      }
+      return shader;
+    }
+
+    function createProgram(context) {
+      const vertexShader = createShader(context, context.VERTEX_SHADER, VERTEX_SOURCE);
+      const fragmentShader = createShader(context, context.FRAGMENT_SHADER, FRAGMENT_SOURCE);
+      const program = context.createProgram();
+      if (!program) {
+        throw new Error("Unable to create WebGL program.");
+      }
+      context.attachShader(program, vertexShader);
+      context.attachShader(program, fragmentShader);
+      context.linkProgram(program);
+      context.deleteShader(vertexShader);
+      context.deleteShader(fragmentShader);
+      if (!context.getProgramParameter(program, context.LINK_STATUS)) {
+        const message = context.getProgramInfoLog(program) || "Unknown shader linking error.";
+        context.deleteProgram(program);
+        throw new Error(message);
+      }
+      return program;
+    }
+
+    function hexToRgb(hexColor) {
+      const value = Number.parseInt(hexColor.slice(1), 16);
+      return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255];
+    }
+
+    function bindRangeOutput(input) {
+      const output = input.parentElement.querySelector("output");
+      const update = () => { output.value = input.value; };
+      input.addEventListener("input", update);
+      update();
+    }
+
+    function resizeCanvas(context) {
+      const pixelRatio = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(canvas.clientWidth * pixelRatio));
+      const height = Math.max(1, Math.round(canvas.clientHeight * pixelRatio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      context.viewport(0, 0, canvas.width, canvas.height);
+    }
+
+    function startPreview(context) {
+      let program;
+      try {
+        program = createProgram(context);
+      } catch (error) {
+        controls.hidden = true;
+        errorMessage.textContent = `Unable to initialize the Voronoi shader: ${error.message}`;
+        errorMessage.style.display = "block";
+        return;
+      }
+
+      const inputIds = ["scale", "jitter", "seed", "animSpeed", "mode", "metric", "edgeWidth", "contrast", "colorA", "colorB", "edgeColor"];
+      const inputs = Object.fromEntries(inputIds.map((id) => [id, document.querySelector(`#${id}`)]));
+      document.querySelectorAll('input[type="range"]').forEach(bindRangeOutput);
+
+      const uniformNames = ["uResolution", "_Scale", "_Jitter", "_Seed", "_AnimSpeed", "_Mode", "_Metric", "_EdgeWidth", "_Contrast", "_ColorA", "_ColorB", "_EdgeColor", "uTime"];
+      const uniforms = Object.fromEntries(uniformNames.map((name) => [name, context.getUniformLocation(program, name)]));
+      const vertexArray = context.createVertexArray();
+      context.bindVertexArray(vertexArray);
+      context.useProgram(program);
+
+      function render(milliseconds) {
+        resizeCanvas(context);
+        context.uniform2f(uniforms.uResolution, canvas.width, canvas.height);
+        context.uniform1f(uniforms._Scale, Number(inputs.scale.value));
+        context.uniform1f(uniforms._Jitter, Number(inputs.jitter.value));
+        context.uniform1f(uniforms._Seed, Number(inputs.seed.value));
+        context.uniform1f(uniforms._AnimSpeed, Number(inputs.animSpeed.value));
+        context.uniform1i(uniforms._Mode, Number(inputs.mode.value));
+        context.uniform1i(uniforms._Metric, Number(inputs.metric.value));
+        context.uniform1f(uniforms._EdgeWidth, Number(inputs.edgeWidth.value));
+        context.uniform1f(uniforms._Contrast, Number(inputs.contrast.value));
+        context.uniform3fv(uniforms._ColorA, hexToRgb(inputs.colorA.value));
+        context.uniform3fv(uniforms._ColorB, hexToRgb(inputs.colorB.value));
+        context.uniform3fv(uniforms._EdgeColor, hexToRgb(inputs.edgeColor.value));
+        context.uniform1f(uniforms.uTime, milliseconds * 0.001);
+        context.drawArrays(context.TRIANGLES, 0, 3);
+        window.requestAnimationFrame(render);
+      }
+
+      document.querySelector("#save").addEventListener("click", () => {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            errorMessage.textContent = "Unable to create the PNG image.";
+            errorMessage.style.display = "block";
+            return;
+          }
+          const downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = downloadUrl;
+          link.download = "voronoi-preview.png";
+          link.click();
+          URL.revokeObjectURL(downloadUrl);
+        }, "image/png");
+      });
+
+      window.requestAnimationFrame(render);
+    }
+  </script>
+</body>
+</html>
