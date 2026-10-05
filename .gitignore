@@ -1,0 +1,4 @@
+.specs/
+.DS_Store
+VoronoiTexture/Baked/
+*.orig
